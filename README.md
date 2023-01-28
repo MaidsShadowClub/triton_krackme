@@ -1,2 +1,4 @@
 #### Simple task with difficult way to solve
-A few ![conditions](res/conditions.jpg) to check input
+
+A few conditions to check input <br>
+![conditions](res/conditions.jpg)
