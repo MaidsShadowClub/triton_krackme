@@ -64,6 +64,13 @@ void setStack(int number, const uint64 value) {
   gctx.setConcreteMemoryValue(var, value);
 }
 
+arch::Register getArgReg(int number) {
+  auto regs = arg_regs[gctx.getArchitecture()];
+  arch::Register reg;
+  reg = gctx.getRegister(regs[number]);
+  return reg;
+}
+
 uint64 getArg(int number) {
   auto regs = arg_regs[gctx.getArchitecture()];
   uint64 ret;
@@ -93,45 +100,33 @@ void setArg(int number, const uint64 value) {
   }
 }
 
-uint64 getGpr(std::string name) {
+uint64 getGpr(const std::string &name) {
   auto gpr_regs = gpr[gctx.getArchitecture()];
-  arch::register_e reg_id = arch::ID_REG_INVALID;
-  for (auto gpr_reg : gpr_regs) {
-    if (gpr_reg.first == name) {
-      reg_id = gpr_reg.second;
-    }
-  }
-  if (reg_id == arch::ID_REG_INVALID)
+  auto reg_id = std::find_if(gpr_regs.begin(), gpr_regs.end(),
+                             [=](auto r) { return r.first == name; });
+  if (reg_id == gpr_regs.end())
     throw std::invalid_argument("cannot get this general purpose register");
-  auto reg = gctx.getRegister(reg_id);
+  auto reg = gctx.getRegister(reg_id->second);
   return static_cast<uint64>(gctx.getConcreteRegisterValue(reg));
 }
 
-void setGpr(std::string name, const uint64 value) {
+void setGpr(const std::string &name, const uint64 value) {
   auto gpr_regs = gpr[gctx.getArchitecture()];
-  arch::register_e reg_id = arch::ID_REG_INVALID;
-  for (auto gpr_reg : gpr_regs) {
-    if (gpr_reg.first == name) {
-      reg_id = gpr_reg.second;
-    }
-  }
-  if (reg_id == arch::ID_REG_INVALID)
+  auto reg_id = std::find_if(gpr_regs.begin(), gpr_regs.end(),
+                             [=](auto r) { return r.first == name; });
+  if (reg_id == gpr_regs.end())
     throw std::invalid_argument("cannot set this general purpose register");
-  auto reg = gctx.getRegister(reg_id);
+  auto reg = gctx.getRegister(reg_id->second);
   gctx.setConcreteRegisterValue(reg, value);
 }
 
-arch::register_e getGprId(std::string name) {
+arch::register_e getGprId(const std::string &name) {
   auto gpr_regs = gpr[gctx.getArchitecture()];
-  arch::register_e reg_id = arch::ID_REG_INVALID;
-  for (auto gpr_reg : gpr_regs) {
-    if (gpr_reg.first == name) {
-      reg_id = gpr_reg.second;
-    }
-  }
-  if (reg_id == arch::ID_REG_INVALID)
+  auto reg_id = std::find_if(gpr_regs.begin(), gpr_regs.end(),
+                             [=](auto r) { return r.first == name; });
+  if (reg_id == gpr_regs.end())
     throw std::invalid_argument("cannot get this general purpose register id");
-  return reg_id;
+  return reg_id->second;
 }
 
 uint64 allocate(uint8 *buf, uint64 size) {
@@ -185,7 +180,7 @@ uint64 lenString(uint64 ptr) {
 
 // print stuff
 
-uint64 printfArgAmount(std::string format) {
+uint64 printfArgAmount(const std::string &format) {
   std::regex const re("%[0-9$#xXzldos]*");
   std::ptrdiff_t const count(
       std::distance(std::sregex_iterator(format.begin(), format.end(), re),

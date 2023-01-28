@@ -8,7 +8,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(LIEF REQUIRED COMPONENTS STATIC)
 find_package(triton REQUIRED CONFIG)
 
-add_executable(triton_krackme main.cpp)
+add_executable(triton_krackme main.cpp utils.hpp hooks.hpp)
 add_library(utils STATIC utils.cpp)
 add_library(hooks STATIC hooks.cpp)
 
