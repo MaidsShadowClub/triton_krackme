@@ -1,8 +1,10 @@
 #include <LIEF/ELF.hpp>
 #include <exception>
 #include <memory>
+#include <ostream>
 #include <stdexcept>
 #include <triton/archEnums.hpp>
+#include <triton/ast.hpp>
 #include <triton/callbacks.hpp>
 #include <triton/callbacksEnums.hpp>
 #include <triton/context.hpp>
@@ -12,73 +14,59 @@
 #include <triton/memoryAccess.hpp>
 #include <triton/modesEnums.hpp>
 #include <triton/register.hpp>
+#include <triton/stubs.hpp>
 
-#include "hooks.hpp"
+#include "routines.hpp"
+#include "ttexplore.hpp"
 #include "utils.hpp"
 
 using namespace triton;
 
 triton::Context gctx;
-bool DEBUG = true;
+bool DEBUG = false;
 std::unique_ptr<const LIEF::ELF::Binary> bin;
 
 #define RELOC_BASE 0x10000000
-#define NULL_HANDLER                                                           \
-  {                                                                            \
-    0, { "stub", NULL }                                                        \
-  }
+#define STUB_BASE 0x11000000
+#define STACK_BASE 0x9FFFFFFF
+
 #define HANDLER(name)                                                          \
   {                                                                            \
-    RELOC_BASE + __COUNTER__ *size::dword, {                                   \
-      (std::string) #name, (uint64(*)()) & name##_HANDLER                      \
+#name, {                                                                   \
+      ROUTINE, RELOC_BASE + __COUNTER__ *size::dword, triton::routines::name   \
     }                                                                          \
   }
 // __COUNTER__ used to determine hook-function in callback
+#define STUB_HANDLER(name)                                                     \
+  {                                                                            \
+    #name, {                                                                   \
+      LIBC_STUB,                                                               \
+          triton::stubs::x8664::systemv::libc::symbols.at(#name) + STUB_BASE,  \
+          triton::routines::stub                                               \
+    }                                                                          \
+  }
 
-struct hook_info {
-  std::string name;
-  uint64 (*func)();
+enum plt_type { ROUTINE = 0, LIBC_STUB, LIBC_CUSTOM };
+
+struct plt_info {
+  triton::uint8 type;
+  triton::uint64 addr;
+  triton::engines::exploration::instCallback cb;
 };
 
 // add relocation or symbol you would like to hook
-std::map<uint64, hook_info> hook_rules{HANDLER(__libc_start_main),
-                                       HANDLER(printf),
-                                       HANDLER(puts),
-                                       HANDLER(fflush),
-                                       HANDLER(getlogin),
-                                       HANDLER(usleep),
-                                       HANDLER(putchar),
-                                       HANDLER(exit),
-                                       HANDLER(strlen),
-                                       HANDLER(fgets),
-                                       NULL_HANDLER};
-
-void handleHooks() {
-  auto pc = getGpr("ip");
-  if (hook_rules.count(pc) == 0)
-    return;
-
-  auto rel = hook_rules[pc];
-  if (rel.func == 0) {
-    throw exceptions::Callbacks("trying to execute NULL_HANDLER");
-  }
-  uint64_t ret = rel.func();
-  ret &= (~0 & (bitsize::qword - 1));
-  setGpr("ret", ret);
-
-  if (rel.name == "__libc_start_main") {
-    return; // the function set own ip to able use argc, argv & env
-  }
-
-  // emulate ip
-  setGpr("ip", getStack(0));
-
-  // restore sp
-  setGpr("sp", getStack(1));
-}
+std::map<std::string, plt_info> custom_plt{HANDLER(__libc_start_main),
+                                           HANDLER(printf),
+                                           HANDLER(puts),
+                                           HANDLER(fflush),
+                                           HANDLER(getlogin),
+                                           HANDLER(usleep),
+                                           HANDLER(putchar),
+                                           HANDLER(exit),
+                                           STUB_HANDLER(strlen),
+                                           HANDLER(fgets)};
 
 void patchExection() {
-  printf("Base: %08x\n", bin->imagebase());
   for (const LIEF::Relocation rel : bin->relocations()) {
     auto addr = rel.address();
     auto symb = bin->get_relocation(addr)->symbol();
@@ -86,16 +74,16 @@ void patchExection() {
       continue;
 
     auto name = symb->name();
-    auto check_hook = [=](std::pair<uint64, hook_info> i) {
-      return i.second.name == name;
+    auto check_hook = [=](std::pair<std::string, plt_info> i) {
+      return i.first == name;
     };
-    auto hook = std::find_if(hook_rules.begin(), hook_rules.end(), check_hook);
-    if (hook == hook_rules.end())
+    auto hook = std::find_if(custom_plt.begin(), custom_plt.end(), check_hook);
+    if (hook == custom_plt.end())
       continue;
 
-    printf("[i] Replacing reloc %s\n", name.data());
+    triton_printf("[i] Replacing reloc %s\n", name.data());
     arch::MemoryAccess mem(addr, gctx.getGprSize());
-    gctx.setConcreteMemoryValue(mem, hook->first);
+    gctx.setConcreteMemoryValue(mem, hook->second.addr);
   }
   for (const LIEF::Symbol symb : bin->symbols()) {
     auto addr = symb.value();
@@ -103,16 +91,16 @@ void patchExection() {
       continue;
 
     auto name = symb.name();
-    auto check_hook = [=](std::pair<uint64, hook_info> i) {
-      return i.second.name == name;
+    auto check_hook = [=](std::pair<std::string, plt_info> i) {
+      return i.first == name;
     };
-    auto hook = std::find_if(hook_rules.begin(), hook_rules.end(), check_hook);
-    if (hook == hook_rules.end())
+    auto hook = std::find_if(custom_plt.begin(), custom_plt.end(), check_hook);
+    if (hook == custom_plt.end())
       continue;
 
-    printf("[i] Replacing symb %s\n", name.data());
+    triton_printf("[i] Replacing symb %s\n", name.data());
     arch::MemoryAccess mem(addr, gctx.getGprSize());
-    gctx.setConcreteMemoryValue(mem, hook->first);
+    gctx.setConcreteMemoryValue(mem, hook->second.addr);
   }
 }
 
@@ -125,35 +113,13 @@ uint64_t loadExec(std::string str) {
     uint64 addr = sect.virtual_address(); // + 0x400000; // for windows
     uint64 size = sect.size();
     auto mem = bin->get_content_from_virtual_address(addr, size);
-    printf("[+] Mapping %#08zx-%#08zx\n", addr, addr + size);
+    triton_printf("[+] Mapping %#08zx-%#08zx\n", addr, addr + size);
     gctx.setConcreteMemoryAreaValue(addr, mem);
   }
+
+  gctx.setConcreteMemoryAreaValue(STUB_BASE,
+                                  triton::stubs::x8664::systemv::libc::code);
   return bin->entrypoint();
-}
-
-void emulate(uint64 pc) {
-  while (pc) {
-    if (!gctx.isConcreteMemoryValueDefined(pc)) {
-      printf("Execute dont defined memory %#08zx\n", pc);
-      break;
-    }
-    auto opcodes = gctx.getConcreteMemoryAreaValue(pc, 16);
-    auto instr = arch::Instruction(
-        pc, reinterpret_cast<uint8 *>(opcodes.data()), opcodes.size());
-    if (gctx.processing(instr) != arch::exception_e::NO_FAULT) {
-      printf("[-] Invalid instruction: %08X\n", pc);
-      break;
-    }
-    debug("\t\t\t\t|%08zx: %s\n", pc, instr.getDisassembly().data());
-    //    if (pc == 0x17b0 || pc == 0x17ed || pc == 0x182a || pc == 0x1863) {
-    //    }
-    handleHooks(); // jump to hook if pc is RELOC_BASE+offset
-
-    // dont use getNextAddress because it calculate pc as
-    // instr_addr+instr_size and handleHooks() set
-    // ip-register so instr_addr will be with old value
-    pc = getGpr("ip");
-  }
 }
 
 void initTriton() {
@@ -161,19 +127,21 @@ void initTriton() {
   gctx.setMode(modes::ALIGNED_MEMORY, true);
   gctx.setMode(modes::AST_OPTIMIZATIONS, true);
   gctx.setMode(modes::CONSTANT_FOLDING, true);
-  gctx.setMode(modes::MEMORY_ARRAY,
-               true); // use smt for bitvectors & array(another way only bv)
-  gctx.setMode(modes::ONLY_ON_SYMBOLIZED, true);
+  // gctx.setMode(modes::MEMORY_ARRAY,
+  //              true); // use smt for bitvectors & array(another way only bv)
+     gctx.setMode(modes::ONLY_ON_SYMBOLIZED, true);
   // gctx.setMode(modes::PC_TRACKING_SYMBOLIC, true);
 
-  gctx.setAstRepresentationMode(ast::representations::PYTHON_REPRESENTATION);
-
-  gctx.concretizeAllMemory();
-  gctx.concretizeAllRegister();
+  gctx.setAstRepresentationMode(ast::representations::SMT_REPRESENTATION);
 
   // setup fake stack regs
-  setGpr("sp", 0x9FFFFFFF);
-  setGpr("bp", 0x9FFFFFFF);
+  setGpr("sp", STACK_BASE);
+  setGpr("bp", STACK_BASE);
+}
+
+// add symbolic for memory
+void symbolize() {
+  gctx.symbolizeMemory(0x9fffff40, 0x32);
 }
 
 int main(int argc, char *argv[]) {
@@ -181,11 +149,21 @@ int main(int argc, char *argv[]) {
 
   uint64 entrypoint =
       loadExec("/home/l09/Work/CTF/20231220 Knight/krackme/krackme_1.out");
-  patchExection(); // bind our _HANDLERS
+  patchExection(); // bind our hooks
 
-  puts("[+] Start execution");
-  puts("=================================");
-  emulate(entrypoint);
-  puts("=================================");
+  auto reg = gctx.getRegister(getGprId("ip"));
+  gctx.setConcreteRegisterValue(reg, entrypoint);
+  symbolize();
+
+  /* Setup exploration */
+  engines::exploration::SymbolicExplorator explorator;
+
+  for (auto plt : custom_plt) {
+    if (plt.second.type == ROUTINE)
+      explorator.hookInstruction(plt.second.addr, plt.second.cb);
+  }
+
+  explorator.initContext(&gctx); /* define an initial context */
+  explorator.explore();          /* do the exploration */
   return 0;
 }
