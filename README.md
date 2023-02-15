@@ -5,7 +5,7 @@ A few conditions to check input <br>
 
 I fully emulate elf binary(even \_\_libc\_start\_main) for this challenge.
 
-Solve based on writeup from really cool guy: https://archercreat.github.io/securinets\_2020\_vm\_rev/
+Solve based on writeup from really cool guy: https://archercreat.github.io/securinets_2020_vm_rev/<br>
 Solve engine is ttexplorer: https://github.com/JonathanSalwan/ttexplore
 
 ```
